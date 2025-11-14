@@ -1,0 +1,816 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================
+// AUTHENTICATION & USER MANAGEMENT
+// ============================================
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  SUB_ADMIN
+  AGENT
+  SUBSCRIBER
+}
+
+enum AuthProvider {
+  EMAIL
+  GOOGLE
+  FACEBOOK
+  SMS
+}
+
+model User {
+  id                String    @id @default(cuid())
+  email             String?   @unique
+  emailVerified     DateTime?
+  phone             String?   @unique
+  phoneVerified     DateTime?
+  password          String?
+  name              String?
+  image             String?
+  role              UserRole  @default(SUBSCRIBER)
+  twoFactorEnabled  Boolean   @default(false)
+  twoFactorSecret   String?
+  
+  authProvider      AuthProvider @default(EMAIL)
+  providerId        String?
+  
+  organizationId    String?
+  organization      Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  lastLoginAt       DateTime?
+  
+  // Relations
+  accounts          Account[]
+  sessions          Session[]
+  customers         Customer[]
+  emailCampaigns    EmailCampaign[]
+  smsCampaigns      SmsCampaign[]
+  chatConversations ChatConversation[]
+  calls             Call[]
+  apiKeys           ApiKey[]
+  subscriptions     Subscription[]
+  
+  @@index([email])
+  @@index([phone])
+  @@index([organizationId])
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ============================================
+// MULTI-TENANT / ORGANIZATION
+// ============================================
+
+model Organization {
+  id              String   @id @default(cuid())
+  name            String
+  slug            String   @unique
+  logo            String?
+  domain          String?  @unique
+  
+  settings        Json?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  users           User[]
+  customers       Customer[]
+  
+  @@index([slug])
+  @@map("organizations")
+}
+
+// ============================================
+// CRM - CUSTOMER MANAGEMENT
+// ============================================
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+  UNSUBSCRIBED
+}
+
+model Customer {
+  id              String         @id @default(cuid())
+  email           String?
+  phone           String?
+  firstName       String?
+  lastName        String?
+  company         String?
+  avatar          String?
+  
+  status          CustomerStatus @default(ACTIVE)
+  
+  tags            Tag[]
+  segments        Segment[]
+  
+  customFields    Json?
+  metadata        Json?
+  
+  emailOptIn      Boolean        @default(true)
+  smsOptIn        Boolean        @default(true)
+  
+  totalSpent      Float          @default(0)
+  orderCount      Int            @default(0)
+  lastOrderAt     DateTime?
+  
+  organizationId  String?
+  organization    Organization?  @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  
+  createdById     String
+  createdBy       User           @relation(fields: [createdById], references: [id])
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  
+  // Relations
+  emailMessages   EmailMessage[]
+  smsMessages     SmsMessage[]
+  chatConversations ChatConversation[]
+  calls           Call[]
+  activities      CustomerActivity[]
+  
+  @@unique([email, organizationId])
+  @@index([email])
+  @@index([phone])
+  @@index([status])
+  @@index([organizationId])
+  @@index([createdById])
+  @@map("customers")
+}
+
+model Tag {
+  id         String     @id @default(cuid())
+  name       String
+  color      String?
+  
+  customers  Customer[]
+  
+  createdAt  DateTime   @default(now())
+  
+  @@unique([name])
+  @@map("tags")
+}
+
+model Segment {
+  id          String     @id @default(cuid())
+  name        String
+  description String?
+  conditions  Json
+  
+  customers   Customer[]
+  
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  
+  @@map("segments")
+}
+
+enum ActivityType {
+  EMAIL_SENT
+  EMAIL_OPENED
+  EMAIL_CLICKED
+  SMS_SENT
+  SMS_RECEIVED
+  CALL_MADE
+  CALL_RECEIVED
+  CHAT_STARTED
+  PURCHASE
+  NOTE_ADDED
+}
+
+model CustomerActivity {
+  id          String       @id @default(cuid())
+  type        ActivityType
+  description String?
+  metadata    Json?
+  
+  customerId  String
+  customer    Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime     @default(now())
+  
+  @@index([customerId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("customer_activities")
+}
+
+// ============================================
+// EMAIL MARKETING
+// ============================================
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  PAUSED
+  CANCELLED
+}
+
+enum CampaignType {
+  REGULAR
+  AUTOMATED
+  AB_TEST
+}
+
+model EmailCampaign {
+  id              String         @id @default(cuid())
+  name            String
+  subject         String
+  previewText     String?
+  fromName        String
+  fromEmail       String
+  replyTo         String?
+  
+  htmlContent     String         @db.Text
+  textContent     String?        @db.Text
+  
+  type            CampaignType   @default(REGULAR)
+  status          CampaignStatus @default(DRAFT)
+  
+  segmentIds      String[]
+  tagIds          String[]
+  
+  scheduledAt     DateTime?
+  sentAt          DateTime?
+  
+  // A/B Testing
+  isAbTest        Boolean        @default(false)
+  abVariantB      Json?
+  abTestPercentage Int?
+  
+  // Analytics
+  totalRecipients Int            @default(0)
+  deliveredCount  Int            @default(0)
+  openedCount     Int            @default(0)
+  clickedCount    Int            @default(0)
+  bouncedCount    Int            @default(0)
+  unsubscribedCount Int          @default(0)
+  
+  createdById     String
+  createdBy       User           @relation(fields: [createdById], references: [id])
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  
+  messages        EmailMessage[]
+  
+  @@index([status])
+  @@index([createdById])
+  @@index([scheduledAt])
+  @@map("email_campaigns")
+}
+
+enum EmailStatus {
+  PENDING
+  SENT
+  DELIVERED
+  OPENED
+  CLICKED
+  BOUNCED
+  FAILED
+  UNSUBSCRIBED
+}
+
+model EmailMessage {
+  id              String      @id @default(cuid())
+  
+  campaignId      String?
+  campaign        EmailCampaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  
+  customerId      String
+  customer        Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  
+  to              String
+  subject         String
+  htmlContent     String      @db.Text
+  textContent     String?     @db.Text
+  
+  status          EmailStatus @default(PENDING)
+  
+  sentAt          DateTime?
+  deliveredAt     DateTime?
+  openedAt        DateTime?
+  clickedAt       DateTime?
+  bouncedAt       DateTime?
+  
+  openCount       Int         @default(0)
+  clickCount      Int         @default(0)
+  
+  errorMessage    String?
+  
+  metadata        Json?
+  
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  
+  @@index([campaignId])
+  @@index([customerId])
+  @@index([status])
+  @@index([sentAt])
+  @@map("email_messages")
+}
+
+// ============================================
+// SMS MARKETING
+// ============================================
+
+model SmsCampaign {
+  id              String         @id @default(cuid())
+  name            String
+  message         String
+  
+  type            CampaignType   @default(REGULAR)
+  status          CampaignStatus @default(DRAFT)
+  
+  segmentIds      String[]
+  tagIds          String[]
+  
+  scheduledAt     DateTime?
+  sentAt          DateTime?
+  
+  // Analytics
+  totalRecipients Int            @default(0)
+  deliveredCount  Int            @default(0)
+  failedCount     Int            @default(0)
+  repliedCount    Int            @default(0)
+  optOutCount     Int            @default(0)
+  
+  createdById     String
+  createdBy       User           @relation(fields: [createdById], references: [id])
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  
+  messages        SmsMessage[]
+  
+  @@index([status])
+  @@index([createdById])
+  @@index([scheduledAt])
+  @@map("sms_campaigns")
+}
+
+enum SmsStatus {
+  PENDING
+  SENT
+  DELIVERED
+  FAILED
+  UNDELIVERED
+  REPLIED
+  OPT_OUT
+}
+
+enum SmsDirection {
+  OUTBOUND
+  INBOUND
+}
+
+model SmsMessage {
+  id              String       @id @default(cuid())
+  
+  campaignId      String?
+  campaign        SmsCampaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  
+  customerId      String
+  customer        Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  
+  to              String
+  from            String
+  message         String
+  
+  direction       SmsDirection @default(OUTBOUND)
+  status          SmsStatus    @default(PENDING)
+  
+  twilioSid       String?      @unique
+  
+  sentAt          DateTime?
+  deliveredAt     DateTime?
+  failedAt        DateTime?
+  
+  errorMessage    String?
+  errorCode       String?
+  
+  metadata        Json?
+  
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  
+  @@index([campaignId])
+  @@index([customerId])
+  @@index([status])
+  @@index([direction])
+  @@index([sentAt])
+  @@map("sms_messages")
+}
+
+// ============================================
+// AI CHATBOT & HELPDESK
+// ============================================
+
+enum ConversationStatus {
+  OPEN
+  ASSIGNED
+  RESOLVED
+  CLOSED
+}
+
+enum MessageSender {
+  CUSTOMER
+  AGENT
+  BOT
+}
+
+model ChatConversation {
+  id              String              @id @default(cuid())
+  
+  customerId      String
+  customer        Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  
+  assignedToId    String?
+  assignedTo      User?               @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
+  
+  status          ConversationStatus  @default(OPEN)
+  
+  subject         String?
+  priority        String?             @default("normal")
+  
+  tags            String[]
+  
+  aiEnabled       Boolean             @default(true)
+  botHandoffAt    DateTime?
+  
+  lastMessageAt   DateTime?
+  
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  closedAt        DateTime?
+  
+  messages        ChatMessage[]
+  
+  @@index([customerId])
+  @@index([assignedToId])
+  @@index([status])
+  @@index([lastMessageAt])
+  @@map("chat_conversations")
+}
+
+model ChatMessage {
+  id              String           @id @default(cuid())
+  
+  conversationId  String
+  conversation    ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  
+  sender          MessageSender
+  content         String           @db.Text
+  
+  metadata        Json?
+  attachments     String[]
+  
+  aiGenerated     Boolean          @default(false)
+  aiModel         String?
+  aiTokens        Int?
+  
+  createdAt       DateTime         @default(now())
+  
+  @@index([conversationId])
+  @@index([sender])
+  @@index([createdAt])
+  @@map("chat_messages")
+}
+
+model KnowledgeBase {
+  id          String   @id @default(cuid())
+  title       String
+  content     String   @db.Text
+  category    String?
+  tags        String[]
+  
+  isPublished Boolean  @default(false)
+  
+  views       Int      @default(0)
+  helpful     Int      @default(0)
+  notHelpful  Int      @default(0)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([category])
+  @@index([isPublished])
+  @@map("knowledge_base")
+}
+
+// ============================================
+// IVR & VOICE CALLS
+// ============================================
+
+enum CallStatus {
+  INITIATED
+  RINGING
+  IN_PROGRESS
+  COMPLETED
+  BUSY
+  FAILED
+  NO_ANSWER
+  CANCELLED
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+model Call {
+  id              String        @id @default(cuid())
+  
+  customerId      String?
+  customer        Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  
+  assignedToId    String?
+  assignedTo      User?         @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
+  
+  direction       CallDirection
+  status          CallStatus    @default(INITIATED)
+  
+  from            String
+  to              String
+  
+  twilioCallSid   String?       @unique
+  
+  duration        Int?
+  recordingUrl    String?
+  transcription   String?       @db.Text
+  
+  ivrPath         String[]
+  
+  startedAt       DateTime?
+  answeredAt      DateTime?
+  endedAt         DateTime?
+  
+  metadata        Json?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  
+  @@index([customerId])
+  @@index([assignedToId])
+  @@index([status])
+  @@index([direction])
+  @@index([startedAt])
+  @@map("calls")
+}
+
+model IvrMenu {
+  id          String   @id @default(cuid())
+  name        String
+  welcomeText String   @db.Text
+  
+  options     Json
+  
+  isActive    Boolean  @default(true)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@map("ivr_menus")
+}
+
+// ============================================
+// PAYMENTS & SUBSCRIPTIONS
+// ============================================
+
+enum SubscriptionPlan {
+  FREE
+  BASIC
+  PRO
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  PAST_DUE
+  TRIALING
+  EXPIRED
+}
+
+model Subscription {
+  id                  String             @id @default(cuid())
+  
+  userId              String
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  plan                SubscriptionPlan   @default(FREE)
+  status              SubscriptionStatus @default(ACTIVE)
+  
+  stripeCustomerId    String?            @unique
+  stripeSubscriptionId String?           @unique
+  stripePriceId       String?
+  
+  currentPeriodStart  DateTime?
+  currentPeriodEnd    DateTime?
+  cancelAtPeriodEnd   Boolean            @default(false)
+  
+  trialStart          DateTime?
+  trialEnd            DateTime?
+  
+  // Credits & Usage
+  emailCredits        Int                @default(0)
+  smsCredits          Int                @default(0)
+  aiCredits           Int                @default(0)
+  
+  emailUsed           Int                @default(0)
+  smsUsed             Int                @default(0)
+  aiUsed              Int                @default(0)
+  
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  cancelledAt         DateTime?
+  
+  invoices            Invoice[]
+  
+  @@index([userId])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+model Invoice {
+  id                String       @id @default(cuid())
+  
+  subscriptionId    String
+  subscription      Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  
+  stripeInvoiceId   String?      @unique
+  
+  amount            Float
+  currency          String       @default("usd")
+  
+  status            String
+  
+  invoiceUrl        String?
+  pdfUrl            String?
+  
+  paidAt            DateTime?
+  
+  createdAt         DateTime     @default(now())
+  
+  @@index([subscriptionId])
+  @@map("invoices")
+}
+
+// ============================================
+// API & INTEGRATIONS
+// ============================================
+
+model ApiKey {
+  id          String   @id @default(cuid())
+  
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  name        String
+  key         String   @unique
+  
+  permissions String[]
+  
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  
+  isActive    Boolean  @default(true)
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([userId])
+  @@index([key])
+  @@map("api_keys")
+}
+
+model Integration {
+  id          String   @id @default(cuid())
+  
+  name        String
+  type        String
+  
+  credentials Json
+  settings    Json?
+  
+  isActive    Boolean  @default(true)
+  
+  lastSyncAt  DateTime?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@map("integrations")
+}
+
+model Webhook {
+  id          String   @id @default(cuid())
+  
+  url         String
+  events      String[]
+  
+  secret      String?
+  
+  isActive    Boolean  @default(true)
+  
+  lastTriggeredAt DateTime?
+  failureCount    Int   @default(0)
+  
+  createdAt   DateTime @default(now())
+  
+  @@map("webhooks")
+}
+
+// ============================================
+// ANALYTICS & REPORTING
+// ============================================
+
+model AnalyticsEvent {
+  id          String   @id @default(cuid())
+  
+  eventName   String
+  eventType   String
+  
+  userId      String?
+  customerId  String?
+  
+  properties  Json?
+  
+  timestamp   DateTime @default(now())
+  
+  @@index([eventName])
+  @@index([eventType])
+  @@index([timestamp])
+  @@map("analytics_events")
+}
+
+model Report {
+  id          String   @id @default(cuid())
+  
+  name        String
+  type        String
+  
+  config      Json
+  
+  fileUrl     String?
+  
+  generatedAt DateTime?
+  
+  createdAt   DateTime @default(now())
+  
+  @@map("reports")
+}
